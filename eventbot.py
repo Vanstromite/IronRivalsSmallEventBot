@@ -550,6 +550,20 @@ async def deleteallevents(ctx):
 
     await ctx.send(response)
 
+@bot.command()
+async def list_commands(ctx):
+    """Lists all available commands."""
+    commands_list = """
+    **Available Commands:**
+    - `!host <event_title> <DD_MM_YYYY> <HH:MM> <description>`: Create a new event.
+    - `!join <event_title>`: Join an event.
+    - `!leave <event_title>`: Leave an event.
+    - `!complete <event_title>`: Mark the event as completed (host/admin only).
+    - `!transferhost <new_host> <event_title>`: Transfer the event host to another user.
+    - `!deleteallevents`: Delete all events and their associated roles/messages (admin only).
+    - `!list_commands`: List all available commands.
+    """
+    await ctx.send(commands_list)
 
 
 try:
