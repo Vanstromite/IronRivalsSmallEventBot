@@ -456,7 +456,58 @@ async def host(ctx, *, args: str = None):
     except Exception:  # Handle unexpected errors (avoid catching specific ones)
         await ctx.send("⚠️ An unexpected error occurred while creating the event. Please try again.")
 
+@bot.command()
+async def transferhost(ctx, new_host: discord.Member, *, event_title: str):
+    """Transfers the event host role to another participant in a specific event."""
+    # ✅ Get the event details from the database using the event title
+    event_data = get_event_data(event_title)
 
+    if not event_data:
+        await ctx.send(f"❌ No event found with the title '{event_title}'. Please check the title and try again.")
+        return
+
+    # ✅ Ensure the current user is the host or an admin
+    if ctx.author.mention != event_data["host"] and not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ You must be the current host or an admin to transfer the host role.")
+        return
+
+    # ✅ Check if the new host is a valid participant
+    attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
+
+    if new_host.mention not in attendees_list:
+        await ctx.send(f"❌ {new_host.mention} is not a participant in the event '{event_title}'!")
+        return
+
+    # ✅ Remove the role from the old host (if they are no longer the host)
+    old_host = discord.utils.get(ctx.guild.members, mention=event_data["host"])
+    if old_host:
+        role = discord.utils.get(ctx.guild.roles, id=event_data["role_id"])
+        if role:
+            await old_host.remove_roles(role)
+            print(f"🗑 Removed role from old host: {event_data['host']}")
+
+    # ✅ Update the host in the database
+    execute_query("UPDATE events SET host = ? WHERE title = ?", (new_host.mention, event_title))
+
+    # ✅ Ensure the role is assigned to the new host
+    role = discord.utils.get(ctx.guild.roles, id=event_data["role_id"])
+    if role:
+        # Check if the new host already has the role
+        if role not in new_host.roles:
+            await new_host.add_roles(role)
+            print(f"✅ Assigned event role to the new host: {new_host.mention}")
+        else:
+            print(f"✅ New host already has the role: {new_host.mention}")
+
+    # ✅ Send a confirmation message
+    await ctx.send(f"✅ The host role for event '{event_title}' has been transferred to {new_host.mention}!")
+
+    # ✅ Update event embed to reflect the new host
+    event_data["host"] = new_host.mention  # ✅ Update the event data
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, event_data)
+        
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def deleteallevents(ctx):
