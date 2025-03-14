@@ -1,3 +1,15 @@
+"""
+This module contains the code for managing events within a Discord bot.
+
+It allows users to create, join, leave, and mark events as completed. 
+The bot also sends reminders for upcoming events and updates event statuses (Upcoming, Ongoing, Completed).
+
+Features:
+- Event creation with role assignment
+- Joining and leaving events with role management
+- Sending reminders and event status updates
+- Host transfer functionality
+"""
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -109,8 +121,7 @@ async def check_event_reminders():
 
 def get_event_data(title):
     """Fetches event details from the database and returns as a dictionary."""
-    event = execute_query("SELECT title, date, time, description, attendees, message_id, role_id, channel_id, host, status FROM events WHERE title = ?", (title,))
-    
+    event = execute_query("SELECT title, date, time, description, attendees, message_id, role_id, channel_id, host, status FROM events WHERE title = ?", (title,)) 
     if not event:
         return None  # Return None if event doesn't exist
 
@@ -194,21 +205,20 @@ async def display_event(ctx, event_data):
 
 class ParticipationView(discord.ui.View):
     """Interactive view with Join, Leave, and Complete buttons for event participation."""
-    def __init__(self, event_title, host):
+    def __init__(self, event_title, event_host):
         super().__init__(timeout=None)
         self.event_title = event_title
-        self.host = host
+        self.event_host = event_host  # Renamed to avoid shadowing 'host' in outer scope
         self.add_item(ParticipateButton(event_title))
         self.add_item(LeaveButton(event_title))
-        self.add_item(CompleteEventButton(event_title, host))
-
+        self.add_item(CompleteEventButton(event_title, event_host))  # Updated to use 'event_host'
 
 class CompleteEventButton(discord.ui.Button):
     """Button to allow the event host or an admin to mark an event as completed."""
-    def __init__(self, event_title, host):
+    def __init__(self, event_title, event_host):
         super().__init__(label="Complete Event", style=discord.ButtonStyle.danger, custom_id=f"complete_{event_title}")
         self.event_title = event_title
-        self.host = host
+        self.event_host = event_host  # Renamed from `host` to `event_host`
 
     async def callback(self, interaction: discord.Interaction):
         """Handles event completion when pressed by the host or an admin."""
@@ -408,6 +418,7 @@ async def host(ctx, *, args: str = None):
             await ctx.send("❌ Invalid date or time format. Please ensure it's `DD_MM_YYYY` or `DD-MM-YYYY` for date and `HH:MM` for time.")
             return
 
+        # Check if the event already exists
         if get_event_data(title):
             await ctx.send(f"❌ An event with the title '{title}' already exists. Please choose a different title.")
             return
@@ -415,24 +426,26 @@ async def host(ctx, *, args: str = None):
         role_name = f"Event {title}"
         role = await ctx.guild.create_role(name=role_name)
 
-        host = ctx.author.mention
-        attendees = host  # Host is the first participant
+        # Rename host to event_host to avoid conflict with event data
+        event_host = ctx.author.mention
+        attendees = event_host  # The host is the first participant
 
         execute_query(
             """INSERT INTO events (title, date, time, description, attendees, message_id, role_id, channel_id, host, status) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (title, event_date, utc_time.strftime("%H:%M UTC"), description, attendees, "", role.id, ctx.channel.id, host, "Upcoming")
+            (title, event_date, utc_time.strftime("%H:%M UTC"), description, attendees, "", role.id, ctx.channel.id, event_host, "Upcoming")
         )
 
         event_data = get_event_data(title)
 
+        # Add host to the role
         await ctx.author.add_roles(role)
 
         if event_data:
             message = await display_event(ctx, event_data)
             execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
-        await ctx.send(f"✅ Event **'{title}'** has been created successfully! Hosted by {host}")
+        await ctx.send(f"✅ Event **'{title}'** has been created successfully! Hosted by {event_host}")
 
     except ValueError:
         await ctx.send("❌ Invalid date or time format. Use `DD_MM_YYYY` for date and `HH:MM` for time.")
@@ -440,7 +453,7 @@ async def host(ctx, *, args: str = None):
         await ctx.send("❌ I don't have permission to create roles. Please check my permissions.")
     except discord.HTTPException:
         await ctx.send("❌ An error occurred while creating the role or event. Please try again.")
-    except Exception as e:
+    except Exception:  # Handle unexpected errors (avoid catching specific ones)
         await ctx.send("⚠️ An unexpected error occurred while creating the event. Please try again.")
 
 
@@ -458,11 +471,13 @@ async def deleteallevents(ctx):
     deleted_messages = 0
 
     for title, role_id, message_id, channel_id in events:
+        # Delete associated role
         role = discord.utils.get(ctx.guild.roles, id=role_id)
         if role:
             await role.delete()
             deleted_roles.append(role.name)
 
+        # Delete associated message
         if message_id:
             channel = bot.get_channel(channel_id)
             if channel:
@@ -473,14 +488,17 @@ async def deleteallevents(ctx):
                 except (discord.NotFound, discord.Forbidden):
                     pass
 
-        execute_query("DELETE FROM events")
+        # Delete event from database
+        execute_query("DELETE FROM events WHERE title = ?", (title,))
 
+    # Send the response about deleted events
     response = "✅ All events have been deleted.\n"
     if deleted_roles:
         response += f"🗑 Deleted roles: {', '.join(deleted_roles)}\n"
     response += f"🗑 Deleted messages: {deleted_messages}"
 
     await ctx.send(response)
+
 
 
 try:
@@ -500,10 +518,11 @@ async def on_ready():
         check_event_reminders.start()
 
     events = execute_query("SELECT title, host FROM events")
-    for title, host in events:
-        bot.add_view(ParticipationView(title, host))
+    for title, event_host in events:  # Renamed `host` to `event_host`
+        bot.add_view(ParticipationView(title, event_host))
 
     print("🎭 Persistent views registered for active events.")
+
 
 try:
     bot.run(TOKEN)
