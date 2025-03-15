@@ -36,10 +36,9 @@ def execute_query(query, params=()):
 
 
 def setup_database():
-    """Creates the events table if it doesn't already exist and adds the 'status' column."""
+    """Creates the events table if it doesn't already exist and adds the 'status' and 'created_at' columns."""
     with sqlite3.connect("events.db") as connection:
         cursor = connection.cursor()
-
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 title TEXT PRIMARY KEY,
@@ -51,11 +50,11 @@ def setup_database():
                 role_id INTEGER,
                 channel_id INTEGER,
                 host TEXT,
-                status TEXT DEFAULT 'Upcoming'
+                status TEXT DEFAULT 'Upcoming',
+                created_at TEXT  -- New column to store the creation timestamp
             )
         """)
         connection.commit()
-
 
 setup_database()
 
@@ -121,7 +120,8 @@ async def check_event_reminders():
 
 def get_event_data(title):
     """Fetches event details from the database and returns as a dictionary."""
-    event = execute_query("SELECT title, date, time, description, attendees, message_id, role_id, channel_id, host, status FROM events WHERE title = ?", (title,)) 
+    event = execute_query("SELECT title, date, time, description, attendees, message_id, role_id, channel_id, host, status, created_at FROM events WHERE title = ?", (title,))
+    
     if not event:
         return None  # Return None if event doesn't exist
 
@@ -137,8 +137,10 @@ def get_event_data(title):
         "role_id": event[6],
         "channel_id": event[7],
         "host": event[8],
-        "status": event[9]
+        "status": event[9],
+        "created_at": event[10] 
     }
+
 
 
 async def display_event(ctx, event_data):
@@ -187,7 +189,18 @@ async def display_event(ctx, event_data):
     formatted_attendees = ", ".join(attendees_list) if attendees_list else "No participants yet"
 
     embed.add_field(name="✅ Participants", value=formatted_attendees, inline=False)
+    
+    # Adding the footer and the custom text after the footer
     embed.set_footer(text="Click a button below to join, leave, or complete the event!")
+
+    # Adding small line after the footer
+    team_size = len(attendees_list)
+    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
+    formatted_creation_time = created_at.strftime("%b %d, %Y at %I:%M %p")
+    additional_info = f"Team Size: {team_size} • Created at {formatted_creation_time}"
+
+    # Send the updated embed with the footer and additional info
+    embed.add_field(name="Info", value=additional_info, inline=False)
 
     view = ParticipationView(event_data["title"], event_data["host"])
     bot.add_view(view)  # Register the view
@@ -384,7 +397,6 @@ class LeaveButton(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ You are not in this event!", ephemeral=True)
 
-
 @bot.command()
 async def host(ctx, *, args: str = None):
     """Creates a new event, assigns a custom role, and displays it with participation buttons."""
@@ -423,38 +435,49 @@ async def host(ctx, *, args: str = None):
             await ctx.send(f"❌ An event with the title '{title}' already exists. Please choose a different title.")
             return
 
-        role_name = f"Event {title}"
-        role = await ctx.guild.create_role(name=role_name)
+        # Start a transaction
+        with sqlite3.connect("events.db") as conn:
+            cursor = conn.cursor()
+            try:
+                # Create role and insert event into database
+                role_name = f"Event {title}"
+                role = await ctx.guild.create_role(name=role_name)
 
-        # Rename host to event_host to avoid conflict with event data
-        event_host = ctx.author.mention
-        attendees = event_host  # The host is the first participant
+                event_host = ctx.author.mention
+                attendees = event_host  # The host is the first participant
 
-        execute_query(
-            """INSERT INTO events (title, date, time, description, attendees, message_id, role_id, channel_id, host, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (title, event_date, utc_time.strftime("%H:%M UTC"), description, attendees, "", role.id, ctx.channel.id, event_host, "Upcoming")
-        )
+                # Insert event data into database
+                cursor.execute("""
+                    INSERT INTO events (title, date, time, description, attendees, message_id, role_id, channel_id, host, status, created_at) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (title, event_date, utc_time.strftime("%H:%M UTC"), description, attendees, "", role.id, ctx.channel.id, event_host, "Upcoming", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
 
-        event_data = get_event_data(title)
+                # Commit the transaction
+                conn.commit()
 
-        # Add host to the role
-        await ctx.author.add_roles(role)
+                # Add host to the role
+                await ctx.author.add_roles(role)
 
-        if event_data:
-            message = await display_event(ctx, event_data)
-            execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
+                # Fetch the event data again
+                event_data = get_event_data(title)
 
-        await ctx.send(f"✅ Event **'{title}'** has been created successfully! Hosted by {event_host}")
+                if event_data:
+                    message = await display_event(ctx, event_data)
+                    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
-    except ValueError:
-        await ctx.send("❌ Invalid date or time format. Use `DD_MM_YYYY` for date and `HH:MM` for time.")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to create roles. Please check my permissions.")
-    except discord.HTTPException:
-        await ctx.send("❌ An error occurred while creating the role or event. Please try again.")
-    except Exception:  # Handle unexpected errors (avoid catching specific ones)
-        await ctx.send("⚠️ An unexpected error occurred while creating the event. Please try again.")
+                await ctx.send(f"✅ Event **'{title}'** has been created successfully! Hosted by {event_host}")
+
+            except Exception as e:
+                # If any error occurs, rollback the transaction
+                conn.rollback()
+                await ctx.send(f"❌ An error occurred while creating the event: {e}")
+                print(f"Error occurred during event creation: {e}")
+
+    except Exception as e:
+        await ctx.send(f"⚠️ An unexpected error occurred while creating the event: {e}")
+        print(f"Unexpected error: {e}")
+
+
 
 @bot.command()
 async def transferhost(ctx, new_host: discord.Member, *, event_title: str):
