@@ -179,28 +179,23 @@ def get_event_data(title):
 
     }
 
+async def display_event_embed_and_view(event_data):
+    """Builds the event embed and participation view (used for initial creation or reuse)."""
+    embed = discord.Embed(
+        title=f"📅 {event_data['title']}",
+        description=event_data['description'],
+        color=discord.Color.blue()
+    )
 
-
-async def display_event(ctx, event_data):
-    """Displays or updates an event embed using event_data dictionary."""
-    embed = discord.Embed(title=f"📅 {event_data['title']}", description=event_data['description'], color=discord.Color.blue())
-
-    # Convert event time (which is in UTC) to desired format (e.g., 19:00 02/23/2025)
     event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-
-    # Format the time as HH:mm (gametime)
     formatted_time = event_time_utc.strftime("%H:%M")
 
-    # Convert event date from DD-MM-YYYY to MM/DD/YYYY and make it aware
-    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")  # Use '-' as separator
-    event_date = event_date.replace(tzinfo=timezone.utc)  # Make it UTC-aware
-    formatted_date = event_date.strftime("%m/%d/%Y")  # Format it as MM/DD/YYYY
+    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y").replace(tzinfo=timezone.utc)
+    formatted_date = event_date.strftime("%m/%d/%Y")
 
-    # Calculate the relative date
-    current_time = datetime.now(timezone.utc)  # Current time in UTC (aware datetime)
-    days_difference = (event_date.date() - current_time.date()).days  # Compare only the date (not time)
+    current_time = datetime.now(timezone.utc)
+    days_difference = (event_date.date() - current_time.date()).days
 
-    # Display the event date with the correct relative time
     if days_difference == 0:
         relative_date = "TODAY"
     elif days_difference > 0:
@@ -208,7 +203,6 @@ async def display_event(ctx, event_data):
     else:
         relative_date = f"{abs(days_difference)} days ago"
 
-    # Display event status
     status_display = {
         "Upcoming": "🟢 Upcoming",
         "Ongoing": "🟡 Ongoing",
@@ -226,28 +220,30 @@ async def display_event(ctx, event_data):
 
     formatted_attendees = ", ".join(attendees_list) if attendees_list else "No participants yet"
 
-    print("max_attendees =", event_data.get("max_attendees"))
     cap = event_data.get("max_attendees")
     if cap is not None:
         formatted_attendees += f" **({len(attendees_list)}/{cap})**"
         if len(attendees_list) >= cap:
             formatted_attendees += " 🔒 Full"
+
     embed.add_field(name="✅ Participants", value=formatted_attendees, inline=False)
-    
-    # Adding the footer and the custom text after the footer
+
     embed.set_footer(text="Click a button below to join, leave, or complete the event!")
 
-    # Adding small line after the footer
     team_size = len(attendees_list)
     created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
     formatted_creation_time = created_at.strftime("%b %d, %Y at %I:%M %p")
     additional_info = f"Team Size: {team_size} • Created at {formatted_creation_time}"
-
-    # Send the updated embed with the footer and additional info
     embed.add_field(name="Info", value=additional_info, inline=False)
 
     view = ParticipationView(event_data["title"], event_data["host"])
-    bot.add_view(view)  # Register the view
+    bot.add_view(view)
+
+    return embed, view
+
+async def display_event(ctx, event_data):
+    """Displays or updates an event embed using event_data dictionary."""
+    embed, view = await display_event_embed_and_view(event_data)
 
     if event_data["message_id"]:
         try:
@@ -258,7 +254,6 @@ async def display_event(ctx, event_data):
             return await ctx.send(embed=embed, view=view)
     else:
         return await ctx.send(embed=embed, view=view)
-
 
 class ParticipationView(discord.ui.View):
     """Interactive view with Join, Leave, and Complete buttons for event participation."""
@@ -317,7 +312,6 @@ class CompleteEventButton(discord.ui.Button):
         execute_query("DELETE FROM events WHERE title = ?", (self.event_title,))
         await interaction.response.send_message(f"✅ Event **'{self.event_title}'** has been marked as **Completed**!", ephemeral=True)
 
-
 async def display_completed_event(ctx, event_data):
     """Displays the final event embed after completion (buttons removed)."""
     embed = discord.Embed(title=f"📅 {event_data['title']}", description=event_data['description'], color=discord.Color.red())
@@ -359,7 +353,6 @@ async def display_completed_event(ctx, event_data):
             return await ctx.send(embed=embed)
     else:
         return await ctx.send(embed=embed)
-
 
 class ParticipateButton(discord.ui.Button):
     """Button to allow users to join an event."""
@@ -517,16 +510,14 @@ async def host_event(
         return
 
     # Create event role
-    role_name = f"Event {title}"
-    role = await interaction.guild.create_role(name=role_name)
+    role = await interaction.guild.create_role(name=f"Event {title}")
     event_host = interaction.user.mention
     attendees = event_host
 
-    # Normalize max_attendees input
     if max_attendees is not None and max_attendees <= 0:
         max_attendees = None
 
-    # Insert event into database
+    # Insert event into the database
     with sqlite3.connect("events.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -540,7 +531,7 @@ async def host_event(
             utc_time.strftime("%H:%M UTC"),
             description,
             attendees,
-            "",
+            "",  # Message ID will be set after sending the embed
             role.id,
             interaction.channel_id,
             event_host,
@@ -550,15 +541,17 @@ async def host_event(
         ))
         conn.commit()
 
-    # Add role to the host
+    # Assign role to the host
     await interaction.user.add_roles(role)
 
-    # Display event
+    # Build the embed and view, then send the initial response
     event_data = get_event_data(title)
-    message = await display_event(interaction.channel, event_data)
-    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
+    embed, view = await display_event_embed_and_view(event_data)
+    await interaction.followup.send(embed=embed, view=view)
 
-    await interaction.followup.send(f"✅ Event **'{title}'** created successfully!")
+    # Update the message_id in the database
+    message = await interaction.original_response()
+    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
 # Slash Command: Delete an Event
 @tree.command(name="deleteevent", description="Delete a specific event and its associated data.")
@@ -741,7 +734,6 @@ async def deleteallevents(interaction: discord.Interaction):
 
     await interaction.response.send_message(summary, ephemeral=True)
 
-
 # Slash Command: List All Commands
 @tree.command(name="commands", description="List all available commands.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -754,7 +746,7 @@ async def list_commands(interaction: discord.Interaction):
     """
     commands_list = """
 **Available Commands:**
-- `/host` – Create a new event
+- `/host_event` – Create a new event
 - `/transferhost` – Transfer event host to another user
 - `/deleteevent` – Delete a specific event
 - `/deleteallevents` – Delete all events (admin only)
@@ -797,7 +789,6 @@ async def edit_time(interaction: discord.Interaction, event_title: str, time: st
 
     await interaction.response.send_message(f"✅ Updated time for '{event_title}'.", ephemeral=True)
 
-
 @edit_group.command(name="date", description="Edit the date of an event.")
 @app_commands.describe(event_title="Event to edit", date="New date (DD-MM-YYYY)")
 async def edit_date(interaction: discord.Interaction, event_title: str, date: str):
@@ -825,7 +816,6 @@ async def edit_date(interaction: discord.Interaction, event_title: str, date: st
         await display_event(channel, get_event_data(event_title))
 
     await interaction.response.send_message(f"✅ Updated date for '{event_title}'.", ephemeral=True)
-
 
 @edit_group.command(name="description", description="Edit the event description.")
 @app_commands.describe(event_title="Event to edit", description="New description")
@@ -986,7 +976,6 @@ async def on_ready():
     print("🎭 Persistent views registered for active events.")
     await tree.sync()
     print("✅ Slash commands synced!")
-
 
 try:
     bot.run(TOKEN)
