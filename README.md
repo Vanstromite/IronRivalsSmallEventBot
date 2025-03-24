@@ -30,7 +30,7 @@ A Discord bot designed to make creating and managing events easy and interactive
 ```json
 {
   "TOKEN": "your-discord-bot-token",
-  "GUILD_ID": 123456789012345678
+  "GUILD_ID": (Discord Server ID) e.g. 123456789012345678
 }
 ```
 ## 🛠️ Installation
