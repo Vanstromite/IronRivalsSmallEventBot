@@ -210,27 +210,41 @@ async def display_event_embed_and_view(event_data):
 
     # Convert time and date
     event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-    formatted_time = event_time_utc.strftime("%H:%M")
     event_date = datetime.strptime(event_data['date'], "%d-%m-%Y").replace(tzinfo=timezone.utc)
-    formatted_date = event_date.strftime("%m/%d/%Y")
 
-    # Calculate countdown
-    current_time = datetime.now(timezone.utc)
+    # Combine into full datetime in UTC
     event_datetime = datetime.combine(event_date.date(), event_time_utc.time()).replace(tzinfo=timezone.utc)
+    timestamp = int(event_datetime.timestamp())
+
+    # Game Date and Time (UTC formatted as "Game Time")
+    formatted_date = event_datetime.strftime("%m/%d/%Y")
+    formatted_game_time = event_datetime.strftime("%H:%M")
+    formatted_local_time = f"<t:{timestamp}:t>"
+
+    # Countdown
+    current_time = datetime.now(timezone.utc)
     time_until_event = event_datetime - current_time
-
-    hours, remainder = divmod(int(time_until_event.total_seconds()), 3600)
-    minutes = remainder // 60
     if time_until_event.total_seconds() > 0:
-        starts_in = f"Starts in {hours}h {minutes}m"
-    else:
-        starts_in = "Already started or in progress"
+        days, remainder = divmod(int(time_until_event.total_seconds()), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes = remainder // 60
 
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0 or days > 0:
+            parts.append(f"{hours}h")
+        parts.append(f"{minutes}m")
+
+        countdown_text = f"Starts in {' '.join(parts)}"
+    else:
+        countdown_text = "Already started or in progress"
     # Add embed fields (with spacing)
     embed.add_field(name="📌 Status", value=f"**{status_display}**\n", inline=False)
     embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
-    embed.add_field(name="🕒 Time", value=f"**{formatted_time}** UTC", inline=True)
-    embed.add_field(name="⏳ Countdown", value=starts_in, inline=False)
+    embed.add_field(name="🕒 Game Time", value=f"**{formatted_game_time}**", inline=True)
+    embed.add_field(name="🕓 Local Time", value=f"{formatted_local_time}", inline=True)
+    embed.add_field(name="⏳ Countdown", value=countdown_text, inline=False)
 
     # Participants
     attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
@@ -278,6 +292,7 @@ async def display_event_embed_and_view(event_data):
     view = ParticipationView(event_data["title"], event_data["host"])
     bot.add_view(view)
     return embed, view
+
 
 async def display_event(ctx, event_data):
     """Displays or updates an event embed using event_data dictionary."""
