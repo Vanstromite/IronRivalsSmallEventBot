@@ -1,27 +1,39 @@
 # Discord Event Management Bot
 
-This bot helps manage events within a Discord server. It allows users to create, join, leave, and mark events as completed. The bot also sends reminders for upcoming events and updates event statuses (Upcoming, Ongoing, Completed).
+A Discord bot designed to make creating and managing events easy and interactive. Supports slash commands, role assignment, persistent buttons, event editing, reminders, and more.
 
-## Features:
-- Event creation with role assignment.
-- Users can join or leave events with role management.
-- Sends reminders for upcoming events.
-- Updates event status (Upcoming, Ongoing, Completed).
-- Allows host transfer functionality.
-- Admin can delete all events and related roles/messages.
+---
 
-## Requirements
+## ✅ Features
 
-- Python 3.8 or higher
-- Discord.py library
-- SQLite3 database (events.db)
-- `config.json` file with your Discord bot's token
-```
+- 🕵️ Slash command-based event creation  
+- 🧠 Autocomplete for event names  
+- 👥 Interactive join/leave buttons with automatic role assignment  
+- 🎧 Host transfer between participants  
+- ♻️ Real-time status updates: Upcoming → Ongoing  
+- ⏰ 30-minute reminders before events  
+- ✏️ Slash command editing for time, date, description, and participant cap  
+- 🔒 Max attendee limits per event  
+- 🧹 Admin tools to delete individual or all events  
+- ❌ Host/Admin can remove participants from events  
+- 💬 Slash command to list available commands  
+
+---
+
+## 📦 Requirements
+
+- Python 3.8+
+- `discord.py` v2.x (with app commands support)
+- SQLite3
+- `config.json` file with your bot token and guild ID:
+
+```json
 {
-    "TOKEN": "put your discord token here"
+  "TOKEN": "your-discord-bot-token",
+  "GUILD_ID": 123456789012345678
 }
 ```
-## Installation
+## 🛠️ Installation
 
 Follow these steps to install and run the bot:
 ```
@@ -29,13 +41,19 @@ pip install -r requirements.txt
 
 python eventbot.py
 ```
-## Commands
+## 💬 Slash Commands
 
-- !host <event_title> <DD_MM_YYYY> <HH:MM> <description>: Create a new event.
-- !join <event_title>: Join an event.
-- !leave <event_title>: Leave an event.
-- !complete <event_title>: Mark the event as completed (host/admin only).
-- !transferhost <new_host> <event_title>: Transfer the event host to another user.
-- !deleteallevents: Delete all events and their associated roles/messages (admin only).
-- !list_commands: List all available commands.
+| Command              | Description                                               |
+|----------------------|-----------------------------------------------------------|
+| `/host`              | Create a new event with title, date, time, and description |
+| `/transferhost`      | Transfer host role to another participant                 |
+| `/deleteevent`       | Delete a specific event (host/admin only)                 |
+| `/deleteallevents`   | Delete all events and roles/messages (admin only)         |
+| `/edit time`         | Edit the event's time                                     |
+| `/edit date`         | Edit the event's date                                     |
+| `/edit description`  | Edit the event's description                              |
+| `/edit max`          | Update the max number of participants                     |
+| `/edit remove`       | Remove a participant from the event                       |
+| `/commands`          | Show all available commands                               |
+
 

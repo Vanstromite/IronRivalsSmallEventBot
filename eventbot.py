@@ -1,7 +1,7 @@
 """
 This module contains the code for managing events within a Discord bot.
 
-It allows users to create, join, leave, and mark events as completed. 
+It allows users to create, join, leave, and mark events as completed.
 The bot also sends reminders for upcoming events and updates event statuses (Upcoming, Ongoing, Completed).
 
 Features:
@@ -9,14 +9,27 @@ Features:
 - Joining and leaving events with role management
 - Sending reminders and event status updates
 - Host transfer functionality
+- RSVP caps and live editing of event details
 """
-import re
+
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import json
 import pytz
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
+from discord.errors import NotFound, Forbidden, HTTPException
+
+# Load configuration from config.json
+try:
+    with open("config.json", "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    TOKEN = config["TOKEN"]
+    GUILD_ID = config["GUILD_ID"]
+except (FileNotFoundError, json.JSONDecodeError):
+    print("❌ Error: `config.json` is missing or invalid. Ensure it exists and is formatted correctly.")
+    exit(1)
 
 # Bot setup
 intents = discord.Intents.default()
@@ -24,10 +37,23 @@ intents.messages = True
 intents.message_content = True
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
+
+# Event command group and subcommands
+event_group = app_commands.Group(
+    name="event",
+    description="Event management commands."
+)
+edit_group = app_commands.Group(
+    name="edit",
+    description="Edit an event's details."
+)
+event_group.add_command(edit_group)
+tree.add_command(event_group)
 
 
 def execute_query(query, params=()):
-    """Executes a query with proper connection handling."""
+    """Executes a SQL query with proper connection handling."""
     with sqlite3.connect("events.db") as conn:
         cursor = conn.cursor()
         cursor.execute(query, params)
@@ -36,7 +62,7 @@ def execute_query(query, params=()):
 
 
 def setup_database():
-    """Creates the events table if it doesn't already exist and adds the 'status' and 'created_at' columns."""
+    """Initializes the database table structure if it doesn't exist."""
     with sqlite3.connect("events.db") as connection:
         cursor = connection.cursor()
         cursor.execute("""
@@ -51,13 +77,20 @@ def setup_database():
                 channel_id INTEGER,
                 host TEXT,
                 status TEXT DEFAULT 'Upcoming',
-                created_at TEXT  -- New column to store the creation timestamp
+                created_at TEXT,
+                max_attendees INTEGER DEFAULT NULL
             )
         """)
         connection.commit()
 
+
 setup_database()
 
+async def autocomplete_event_titles(interaction: discord.Interaction, current: str):
+    """Suggests up to 25 matching event titles based on user input."""
+    results = execute_query("SELECT title FROM events")
+    titles = [row[0] for row in results if row[0].lower().startswith(current.lower())]
+    return [app_commands.Choice(name=title, value=title) for title in titles[:25]]
 
 @tasks.loop(minutes=1)
 async def check_event_reminders():
@@ -119,9 +152,12 @@ async def check_event_reminders():
 
 
 def get_event_data(title):
-    """Fetches event details from the database and returns as a dictionary."""
-    event = execute_query("SELECT title, date, time, description, attendees, message_id, role_id, channel_id, host, status, created_at FROM events WHERE title = ?", (title,))
-    
+    event = execute_query("""
+        SELECT title, date, time, description, attendees, message_id,
+               role_id, channel_id, host, status, created_at, max_attendees
+        FROM events WHERE title = ?
+    """, (title,))
+
     if not event:
         return None  # Return None if event doesn't exist
 
@@ -138,7 +174,9 @@ def get_event_data(title):
         "channel_id": event[7],
         "host": event[8],
         "status": event[9],
-        "created_at": event[10] 
+        "created_at": event[10],
+        "max_attendees": event[11] if len(event) > 11 else None
+
     }
 
 
@@ -188,6 +226,12 @@ async def display_event(ctx, event_data):
 
     formatted_attendees = ", ".join(attendees_list) if attendees_list else "No participants yet"
 
+    print("max_attendees =", event_data.get("max_attendees"))
+    cap = event_data.get("max_attendees")
+    if cap is not None:
+        formatted_attendees += f" **({len(attendees_list)}/{cap})**"
+        if len(attendees_list) >= cap:
+            formatted_attendees += " 🔒 Full"
     embed.add_field(name="✅ Participants", value=formatted_attendees, inline=False)
     
     # Adding the footer and the custom text after the footer
@@ -332,9 +376,20 @@ class ParticipateButton(discord.ui.Button):
             return
 
         attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
+        max_cap = event_data.get("max_attendees")
 
+        # Prevent duplicate join
         if interaction.user.mention in attendees_list:
             await interaction.response.send_message("❌ You are already participating!", ephemeral=True)
+            return
+
+        # Always include the host in the count (before checking cap)
+        if event_data["host"] not in attendees_list:
+            attendees_list.insert(0, event_data["host"])
+
+        # Enforce max attendee cap
+        if max_cap and len(attendees_list) >= max_cap:
+            await interaction.response.send_message("❌ This event is full!", ephemeral=True)
             return
 
         attendees_list.append(interaction.user.mention)  # Add user to attendees
@@ -343,16 +398,23 @@ class ParticipateButton(discord.ui.Button):
         execute_query("UPDATE events SET attendees = ? WHERE title = ?", (formatted_attendees, self.event_title))
 
         role = discord.utils.get(interaction.guild.roles, id=event_data["role_id"])
-        if role:
-            await interaction.user.add_roles(role)
 
+        # If role was deleted, recreate it and update DB
+        if role is None:
+            role_name = f"Event {self.event_title}"
+            role = await interaction.guild.create_role(name=role_name)
+            execute_query("UPDATE events SET role_id = ? WHERE title = ?", (role.id, self.event_title))
+            print(f"♻️ Recreated missing role for event '{self.event_title}'")
+
+        # Assign role if user doesn't already have it
+        if role not in interaction.user.roles:
+            await interaction.user.add_roles(role)
         event_data["attendees"] = formatted_attendees  # Update event data locally
         channel = bot.get_channel(event_data["channel_id"])
         if channel:
             await display_event(channel, event_data)
 
         await interaction.response.send_message(f"✅ {interaction.user.mention} has joined the event!", ephemeral=True)
-
 
 class LeaveButton(discord.ui.Button):
     """Button to allow users to leave an event."""
@@ -383,9 +445,23 @@ class LeaveButton(discord.ui.Button):
             if role:
                 await interaction.user.remove_roles(role)
 
-                if not role.members:
+                # Re-check latest event data
+                event_data = get_event_data(self.event_title)
+
+                # Pull latest list of attendees
+                remaining_attendees = event_data["attendees"].split(", ") if event_data["attendees"] else []
+
+                # Check if current host is still an attendee
+                host_still_attending = event_data["host"] in remaining_attendees
+
+                # Only delete the role if no attendees and no host
+                if not remaining_attendees and not host_still_attending:
                     await role.delete()
                     execute_query("UPDATE events SET role_id = NULL WHERE title = ?", (self.event_title,))
+                    print(f"🗑 Deleted event role '{role.name}' because it had no remaining members.")
+                else:
+                    print(f"ℹ️ Role '{role.name}' not deleted — still in use.")
+
 
             event_data["attendees"] = ", ".join(attendees_list)
 
@@ -397,161 +473,252 @@ class LeaveButton(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ You are not in this event!", ephemeral=True)
 
-@bot.command()
-async def host(ctx, *, args: str = None):
-    """Creates a new event, assigns a custom role, and displays it with participation buttons."""
-    if not args:
-        await ctx.send("❌ Usage: `!host <event_title> <DD_MM_YYYY> <HH:MM> <description>`")
+# Slash Command: Create a New Event
+@tree.command(name="host_event", description="Create a new event with title, date, time, and description.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    title="Title of the event",
+    date="Date in DD-MM-YYYY format",
+    time="Time in HH:MM (24h)",
+    description="Details about the event",
+    max_attendees="Max number of participants (optional)"
+)
+async def host_event(
+    interaction: discord.Interaction,
+    title: str,
+    date: str,
+    time: str,
+    description: str,
+    max_attendees: int = None
+):
+    """
+    Slash command to create a new event.
+
+    Args:
+        interaction (discord.Interaction): The interaction from Discord.
+        title (str): Event title.
+        date (str): Date in DD-MM-YYYY format.
+        time (str): Time in HH:MM (24h format).
+        description (str): Description of the event.
+        max_attendees (int, optional): Max number of participants.
+    """
+    await interaction.response.defer(thinking=True)
+
+    # Check for duplicate event
+    if get_event_data(title):
+        await interaction.followup.send(f"❌ An event with the title '{title}' already exists.")
         return
 
     try:
-        date_pattern = re.compile(r'\d{2}[-_]\d{2}[-_]\d{4}')
-        parts = args.split()
+        event_date = datetime.strptime(date, "%d-%m-%Y").strftime("%d-%m-%Y")
+        utc_time = datetime.strptime(time, "%H:%M").replace(tzinfo=pytz.utc)
+    except ValueError:
+        await interaction.followup.send("❌ Invalid date or time format.")
+        return
 
-        if len(parts) < 4:
-            await ctx.send("❌ Usage: `!host <event_title> <DD_MM_YYYY> <HH:MM> <description>`")
-            return
+    # Create event role
+    role_name = f"Event {title}"
+    role = await interaction.guild.create_role(name=role_name)
+    event_host = interaction.user.mention
+    attendees = event_host
 
-        date_index = next((i for i, part in enumerate(parts) if date_pattern.fullmatch(part)), -1)
+    # Normalize max_attendees input
+    if max_attendees is not None and max_attendees <= 0:
+        max_attendees = None
 
-        if date_index == -1 or date_index + 2 >= len(parts):
-            await ctx.send("❌ Invalid date or time format. Ensure it's `DD_MM_YYYY` or `DD-MM-YYYY` for date and `HH:MM` for time.")
-            return
+    # Insert event into database
+    with sqlite3.connect("events.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO events (
+                title, date, time, description, attendees, message_id,
+                role_id, channel_id, host, status, created_at, max_attendees
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            title,
+            event_date,
+            utc_time.strftime("%H:%M UTC"),
+            description,
+            attendees,
+            "",
+            role.id,
+            interaction.channel_id,
+            event_host,
+            "Upcoming",
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            max_attendees
+        ))
+        conn.commit()
 
-        title = " ".join(parts[:date_index])
-        date = parts[date_index]
-        time = parts[date_index + 1]
-        description = " ".join(parts[date_index + 2:]) if date_index + 2 < len(parts) else "Event description not provided"
+    # Add role to the host
+    await interaction.user.add_roles(role)
 
-        try:
-            event_date = datetime.strptime(date, "%d-%m-%Y").strftime("%d-%m-%Y")
-            utc_time = datetime.strptime(time, "%H:%M").replace(tzinfo=pytz.utc)
-        except ValueError:
-            await ctx.send("❌ Invalid date or time format. Please ensure it's `DD_MM_YYYY` or `DD-MM-YYYY` for date and `HH:MM` for time.")
-            return
+    # Display event
+    event_data = get_event_data(title)
+    message = await display_event(interaction.channel, event_data)
+    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
-        # Check if the event already exists
-        if get_event_data(title):
-            await ctx.send(f"❌ An event with the title '{title}' already exists. Please choose a different title.")
-            return
+    await interaction.followup.send(f"✅ Event **'{title}'** created successfully!")
 
-        # Start a transaction
-        with sqlite3.connect("events.db") as conn:
-            cursor = conn.cursor()
-            try:
-                # Create role and insert event into database
-                role_name = f"Event {title}"
-                role = await ctx.guild.create_role(name=role_name)
+# Slash Command: Delete an Event
+@tree.command(name="deleteevent", description="Delete a specific event and its associated data.")
+@app_commands.describe(event_title="Title of the event to delete")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def deleteevent(interaction: discord.Interaction, event_title: str):
+    """
+    Slash command to delete a specific event, including its role, message, and database entry.
 
-                event_host = ctx.author.mention
-                attendees = event_host  # The host is the first participant
-
-                # Insert event data into database
-                cursor.execute("""
-                    INSERT INTO events (title, date, time, description, attendees, message_id, role_id, channel_id, host, status, created_at) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (title, event_date, utc_time.strftime("%H:%M UTC"), description, attendees, "", role.id, ctx.channel.id, event_host, "Upcoming", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
-
-                # Commit the transaction
-                conn.commit()
-
-                # Add host to the role
-                await ctx.author.add_roles(role)
-
-                # Fetch the event data again
-                event_data = get_event_data(title)
-
-                if event_data:
-                    message = await display_event(ctx, event_data)
-                    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
-
-                await ctx.send(f"✅ Event **'{title}'** has been created successfully! Hosted by {event_host}")
-
-            except Exception as e:
-                # If any error occurs, rollback the transaction
-                conn.rollback()
-                await ctx.send(f"❌ An error occurred while creating the event: {e}")
-                print(f"Error occurred during event creation: {e}")
-
-    except Exception as e:
-        await ctx.send(f"⚠️ An unexpected error occurred while creating the event: {e}")
-        print(f"Unexpected error: {e}")
-
-
-
-@bot.command()
-async def transferhost(ctx, new_host: discord.Member, *, event_title: str):
-    """Transfers the event host role to another participant in a specific event."""
-    # ✅ Get the event details from the database using the event title
+    Args:
+        interaction (discord.Interaction): The interaction context.
+        event_title (str): The title of the event to delete.
+    """
     event_data = get_event_data(event_title)
 
     if not event_data:
-        await ctx.send(f"❌ No event found with the title '{event_title}'. Please check the title and try again.")
+        await interaction.response.send_message(
+            f"❌ No event found with the title '{event_title}'.", ephemeral=True
+        )
         return
 
-    # ✅ Ensure the current user is the host or an admin
-    if ctx.author.mention != event_data["host"] and not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ You must be the current host or an admin to transfer the host role.")
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "❌ Only the event host or an admin can delete this event.", ephemeral=True
+        )
         return
 
-    # ✅ Check if the new host is a valid participant
-    attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
-
-    if new_host.mention not in attendees_list:
-        await ctx.send(f"❌ {new_host.mention} is not a participant in the event '{event_title}'!")
-        return
-
-    # ✅ Remove the role from the old host (if they are no longer the host)
-    old_host = discord.utils.get(ctx.guild.members, mention=event_data["host"])
-    if old_host:
-        role = discord.utils.get(ctx.guild.roles, id=event_data["role_id"])
-        if role:
-            await old_host.remove_roles(role)
-            print(f"🗑 Removed role from old host: {event_data['host']}")
-
-    # ✅ Update the host in the database
-    execute_query("UPDATE events SET host = ? WHERE title = ?", (new_host.mention, event_title))
-
-    # ✅ Ensure the role is assigned to the new host
-    role = discord.utils.get(ctx.guild.roles, id=event_data["role_id"])
+    # Delete the associated role if it exists
+    role = discord.utils.get(interaction.guild.roles, id=event_data["role_id"])
     if role:
-        # Check if the new host already has the role
-        if role not in new_host.roles:
-            await new_host.add_roles(role)
-            print(f"✅ Assigned event role to the new host: {new_host.mention}")
-        else:
-            print(f"✅ New host already has the role: {new_host.mention}")
+        await role.delete()
 
-    # ✅ Send a confirmation message
-    await ctx.send(f"✅ The host role for event '{event_title}' has been transferred to {new_host.mention}!")
+    # Delete the associated message if it exists
+    if event_data["message_id"]:
+        channel = bot.get_channel(event_data["channel_id"])
+        if channel:
+            try:
+                message = await channel.fetch_message(int(event_data["message_id"]))
+                await message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
 
-    # ✅ Update event embed to reflect the new host
-    event_data["host"] = new_host.mention  # ✅ Update the event data
+    # Remove the event from the database
+    execute_query("DELETE FROM events WHERE title = ?", (event_title,))
+
+    await interaction.response.send_message(f"🗑️ Event **'{event_title}'** has been deleted.")
+
+@deleteevent.autocomplete("event_title")
+async def deleteevent_autocomplete(interaction: discord.Interaction, current: str):
+    """
+    Provides autocomplete suggestions for the deleteevent command.
+    """
+    return await autocomplete_event_titles(interaction, current)
+
+# Slash Command: Transfer Event Host
+@tree.command(name="transferhost", description="Transfer event hosting to another participant.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+@app_commands.describe(
+    new_host="The user to transfer hosting to",
+    event_title="Title of the event"
+)
+async def transferhost(
+    interaction: discord.Interaction,
+    new_host: discord.Member,
+    event_title: str
+):
+    """
+    Slash command to transfer event hosting to another participant.
+
+    Args:
+        interaction (discord.Interaction): The interaction from Discord.
+        new_host (discord.Member): Member to transfer hosting to.
+        event_title (str): Title of the event.
+    """
+    event_data = get_event_data(event_title)
+
+    if not event_data:
+        await interaction.response.send_message(
+            f"❌ No event found with the title '{event_title}'.", ephemeral=True
+        )
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "❌ Only the current host or an admin can transfer hosting.", ephemeral=True
+        )
+        return
+
+    attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
+    if new_host.mention not in attendees_list:
+        await interaction.response.send_message(
+            f"❌ {new_host.mention} is not a participant in '{event_title}'.", ephemeral=True
+        )
+        return
+
+    # Revoke role from old host
+    old_host = discord.utils.get(interaction.guild.members, mention=event_data["host"])
+    role = discord.utils.get(interaction.guild.roles, id=event_data["role_id"])
+    if old_host and role:
+        await old_host.remove_roles(role)
+
+    # Grant role to new host if missing
+    if role and role not in new_host.roles:
+        await new_host.add_roles(role)
+
+    # Update database and event info
+    execute_query("UPDATE events SET host = ? WHERE title = ?", (new_host.mention, event_title))
+    event_data["host"] = new_host.mention
+
+    # Refresh embed
     channel = bot.get_channel(event_data["channel_id"])
     if channel:
         await display_event(channel, event_data)
-        
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def deleteallevents(ctx):
-    """Deletes all events, removes associated roles, and clears event messages."""
+
+    await interaction.response.send_message(
+        f"✅ Host for '{event_title}' transferred to {new_host.mention}."
+    )
+
+@transferhost.autocomplete("event_title")
+async def event_title_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+):
+    """
+    Provides autocomplete suggestions for the transferhost command.
+    """
+    results = execute_query("SELECT title FROM events")
+    titles = [row[0] for row in results if current.lower() in row[0].lower()]
+    return [
+        app_commands.Choice(name=title, value=title) for title in titles[:25]
+    ]
+
+# Slash Command: Delete All Events (Admin Only)
+@tree.command(
+    name="deleteallevents",
+    description="Delete all events and their roles/messages (admin only)."
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def deleteallevents(interaction: discord.Interaction):
+    """
+    Admin-only command to delete all events, their roles, and messages.
+    """
     events = execute_query("SELECT title, role_id, message_id, channel_id FROM events")
 
     if not events:
-        await ctx.send("✅ No events found to delete.")
+        await interaction.response.send_message("✅ No events to delete.", ephemeral=True)
         return
 
     deleted_roles = []
     deleted_messages = 0
 
     for title, role_id, message_id, channel_id in events:
-        # Delete associated role
-        role = discord.utils.get(ctx.guild.roles, id=role_id)
+        # Delete associated role if it exists
+        role = discord.utils.get(interaction.guild.roles, id=role_id)
         if role:
             await role.delete()
             deleted_roles.append(role.name)
 
-        # Delete associated message
+        # Delete associated message if possible
         if message_id:
             channel = bot.get_channel(channel_id)
             if channel:
@@ -559,49 +726,256 @@ async def deleteallevents(ctx):
                     message = await channel.fetch_message(int(message_id))
                     await message.delete()
                     deleted_messages += 1
-                except (discord.NotFound, discord.Forbidden):
+                except (NotFound, Forbidden, HTTPException):
                     pass
 
         # Delete event from database
         execute_query("DELETE FROM events WHERE title = ?", (title,))
 
-    # Send the response about deleted events
-    response = "✅ All events have been deleted.\n"
-    if deleted_roles:
-        response += f"🗑 Deleted roles: {', '.join(deleted_roles)}\n"
-    response += f"🗑 Deleted messages: {deleted_messages}"
+    # Summary message
+    summary = (
+        f"✅ Deleted all events.\n"
+        f"🗑 Roles: {', '.join(deleted_roles) if deleted_roles else 'None'}\n"
+        f"🧹 Messages: {deleted_messages}"
+    )
 
-    await ctx.send(response)
+    await interaction.response.send_message(summary, ephemeral=True)
 
-@bot.command()
-async def list_commands(ctx):
-    """Lists all available commands."""
-    commands_list = """
-    **Available Commands:**
-    - `!host <event_title> <DD_MM_YYYY> <HH:MM> <description>`: Create a new event.
-    - `!join <event_title>`: Join an event.
-    - `!leave <event_title>`: Leave an event.
-    - `!complete <event_title>`: Mark the event as completed (host/admin only).
-    - `!transferhost <new_host> <event_title>`: Transfer the event host to another user.
-    - `!deleteallevents`: Delete all events and their associated roles/messages (admin only).
-    - `!list_commands`: List all available commands.
+
+# Slash Command: List All Commands
+@tree.command(name="commands", description="List all available commands.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def list_commands(interaction: discord.Interaction):
     """
-    await ctx.send(commands_list)
+    Displays a list of available slash commands for users.
+
+    Args:
+        interaction (discord.Interaction): The interaction context.
+    """
+    commands_list = """
+**Available Commands:**
+- `/host` – Create a new event
+- `/transferhost` – Transfer event host to another user
+- `/deleteevent` – Delete a specific event
+- `/deleteallevents` – Delete all events (admin only)
+- `/edit time` – Edit the time of an event
+- `/edit date` – Edit the date of an event
+- `/edit description` – Edit the description of an event
+- `/edit max` – Edit the maximum number of participants
+- `/edit remove` – Remove a participant from an event
+- `/commands` – Show this command list
+    """
+    await interaction.response.send_message(commands_list, ephemeral=True)
+
+# Edit Commands for Event Management
+
+@edit_group.command(name="time", description="Edit the time of an event.")
+@app_commands.describe(event_title="Event to edit", time="New time (HH:MM)")
+async def edit_time(interaction: discord.Interaction, event_title: str, time: str):
+    """
+    Edits the time of an existing event.
+    """
+    event_data = get_event_data(event_title)
+    if not event_data:
+        await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only the host or an admin can edit this event.", ephemeral=True)
+        return
+
+    try:
+        datetime.strptime(time, "%H:%M")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid time format. Use HH:MM (24h).", ephemeral=True)
+        return
+
+    execute_query("UPDATE events SET time = ? WHERE title = ?", (time + " UTC", event_title))
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, get_event_data(event_title))
+
+    await interaction.response.send_message(f"✅ Updated time for '{event_title}'.", ephemeral=True)
 
 
-try:
-    with open("config.json", "r", encoding="utf-8") as config_file:
-        config = json.load(config_file)
-    TOKEN = config["TOKEN"]
-except (FileNotFoundError, json.JSONDecodeError):
-    print("❌ Error: `config.json` is missing or invalid. Ensure it exists and is formatted correctly.")
-    exit(1)
+@edit_group.command(name="date", description="Edit the date of an event.")
+@app_commands.describe(event_title="Event to edit", date="New date (DD-MM-YYYY)")
+async def edit_date(interaction: discord.Interaction, event_title: str, date: str):
+    """
+    Edits the date of an existing event.
+    """
+    event_data = get_event_data(event_title)
+    if not event_data:
+        await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only the host or an admin can edit this event.", ephemeral=True)
+        return
+
+    try:
+        datetime.strptime(date, "%d-%m-%Y")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid date format. Use DD-MM-YYYY.", ephemeral=True)
+        return
+
+    execute_query("UPDATE events SET date = ? WHERE title = ?", (date, event_title))
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, get_event_data(event_title))
+
+    await interaction.response.send_message(f"✅ Updated date for '{event_title}'.", ephemeral=True)
+
+
+@edit_group.command(name="description", description="Edit the event description.")
+@app_commands.describe(event_title="Event to edit", description="New description")
+async def edit_description(interaction: discord.Interaction, event_title: str, description: str):
+    """
+    Edits the description of an existing event.
+    """
+    event_data = get_event_data(event_title)
+    if not event_data:
+        await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only the host or an admin can edit this event.", ephemeral=True)
+        return
+
+    if len(description) < 5:
+        await interaction.response.send_message("❌ Description too short.", ephemeral=True)
+        return
+
+    execute_query("UPDATE events SET description = ? WHERE title = ?", (description, event_title))
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, get_event_data(event_title))
+
+    await interaction.response.send_message(f"✅ Updated description for '{event_title}'.", ephemeral=True)
+
+# Edit Command: Update Maximum Attendees
+@edit_group.command(name="max", description="Edit the maximum number of participants.")
+@app_commands.describe(
+    event_title="The event you want to update",
+    max_attendees="New max number of participants (0 for unlimited)"
+)
+async def edit_max(
+    interaction: discord.Interaction,
+    event_title: str,
+    max_attendees: int
+):
+    """
+    Updates the maximum number of attendees for a given event.
+
+    Args:
+        interaction (discord.Interaction): The interaction context.
+        event_title (str): The title of the event.
+        max_attendees (int): The new maximum number of participants.
+    """
+    event_data = get_event_data(event_title)
+
+    if not event_data:
+        await interaction.response.send_message(f"❌ Event '{event_title}' not found.", ephemeral=True)
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only the host or an admin can update the cap.", ephemeral=True)
+        return
+
+    if max_attendees < 0:
+        await interaction.response.send_message("❌ Max attendees cannot be negative.", ephemeral=True)
+        return
+
+    value = None if max_attendees == 0 else max_attendees
+
+    execute_query("UPDATE events SET max_attendees = ? WHERE title = ?", (value, event_title))
+
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, get_event_data(event_title))
+
+    msg = (
+        f"✅ Max participants for **'{event_title}'** "
+        f"updated to **{max_attendees if value else 'Unlimited'}**."
+    )
+    await interaction.response.send_message(msg, ephemeral=True)
+# Command: Remove a Participant from an Event
+@edit_group.command(name="remove", description="Remove a participant from an event.")
+@app_commands.describe(
+    event_title="The event to modify",
+    member="The user to remove from the event"
+)
+async def remove_participant(
+    interaction: discord.Interaction,
+    event_title: str,
+    member: discord.Member
+):
+    """
+    Removes a participant from a specific event.
+
+    Args:
+        interaction (discord.Interaction): The interaction context.
+        event_title (str): The title of the event.
+        member (discord.Member): The participant to remove.
+    """
+    event_data = get_event_data(event_title)
+
+    if not event_data:
+        await interaction.response.send_message("❌ Event not found.", ephemeral=True)
+        return
+
+    if interaction.user.mention != event_data["host"] and not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Only the host or an admin can remove participants.", ephemeral=True)
+        return
+
+    attendees = event_data["attendees"].split(", ") if event_data["attendees"] else []
+
+    if member.mention not in attendees:
+        await interaction.response.send_message(f"❌ {member.mention} is not a participant in '{event_title}'.", ephemeral=True)
+        return
+
+    attendees.remove(member.mention)
+    updated_attendees = ", ".join(attendees)
+
+    execute_query("UPDATE events SET attendees = ? WHERE title = ?", (updated_attendees, event_title))
+
+    # Remove the role from the user
+    role = discord.utils.get(interaction.guild.roles, id=event_data["role_id"])
+    if role and role in member.roles:
+        await member.remove_roles(role)
+
+    # Refresh the event display
+    channel = bot.get_channel(event_data["channel_id"])
+    if channel:
+        await display_event(channel, get_event_data(event_title))
+
+    await interaction.response.send_message(f"✅ {member.mention} has been removed from **'{event_title}'**.", ephemeral=True)
+    
+# Shared Autocomplete for Edit Commands
+@remove_participant.autocomplete("event_title")
+@edit_max.autocomplete("event_title")
+@edit_time.autocomplete("event_title")
+@edit_date.autocomplete("event_title")
+@edit_description.autocomplete("event_title")
+async def autocomplete_edit_titles(interaction: discord.Interaction, current: str):
+    """
+    Provides autocomplete suggestions for event titles when editing event properties.
+
+    Args:
+        interaction (discord.Interaction): The interaction context.
+        current (str): The current input text to match against event titles.
+
+    Returns:
+        List[app_commands.Choice]: A list of matching event title choices.
+    """
+    return await autocomplete_event_titles(interaction, current)
 
 @bot.event
 async def on_ready():
     """Triggered when the bot is ready."""
     print(f'✅ Logged in as {bot.user}')
-
+    guild = discord.Object(id=GUILD_ID)
+    await tree.sync(guild=guild)  # Sync instantly to just this server
     if not check_event_reminders.is_running():
         check_event_reminders.start()
 
@@ -610,6 +984,8 @@ async def on_ready():
         bot.add_view(ParticipationView(title, event_host))
 
     print("🎭 Persistent views registered for active events.")
+    await tree.sync()
+    print("✅ Slash commands synced!")
 
 
 try:
