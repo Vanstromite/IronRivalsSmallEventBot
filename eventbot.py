@@ -180,28 +180,21 @@ def get_event_data(title):
     }
 
 async def display_event_embed_and_view(event_data):
-    """Builds the event embed and participation view (used for initial creation or reuse)."""
-    embed = discord.Embed(
-        title=f"📅 {event_data['title']}",
-        description=event_data['description'],
-        color=discord.Color.blue()
-    )
+    """
+    Builds a polished embed and participation view for the given event.
 
-    event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-    formatted_time = event_time_utc.strftime("%H:%M")
+    Args:
+        event_data (dict): Dictionary containing all event details.
 
-    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y").replace(tzinfo=timezone.utc)
-    formatted_date = event_date.strftime("%m/%d/%Y")
-
-    current_time = datetime.now(timezone.utc)
-    days_difference = (event_date.date() - current_time.date()).days
-
-    if days_difference == 0:
-        relative_date = "TODAY"
-    elif days_difference > 0:
-        relative_date = f"In {days_difference} days"
-    else:
-        relative_date = f"{abs(days_difference)} days ago"
+    Returns:
+        tuple: discord.Embed, discord.ui.View
+    """
+    # Color based on event status
+    status_colors = {
+        "Upcoming": discord.Color.green(),
+        "Ongoing": discord.Color.gold(),
+        "Completed": discord.Color.red()
+    }
 
     status_display = {
         "Upcoming": "🟢 Upcoming",
@@ -209,36 +202,81 @@ async def display_event_embed_and_view(event_data):
         "Completed": "🔴 Completed"
     }.get(event_data["status"], "❓ Unknown")
 
-    embed.add_field(name="📌 Status", value=status_display, inline=False)
-    embed.add_field(name="🎤 Host", value=event_data["host"], inline=False)
-    embed.add_field(name="📅 Date", value=f"{formatted_date} ({relative_date})", inline=False)
-    embed.add_field(name="🕒 Time", value=f"{formatted_time} (gametime)", inline=False)
+    embed = discord.Embed(
+        title=f"📅 {event_data['title']}",
+        description=f"📝 {event_data['description']}",
+        color=status_colors.get(event_data["status"], discord.Color.greyple())
+    )
 
+    # Convert time and date
+    event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
+    formatted_time = event_time_utc.strftime("%H:%M")
+    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y").replace(tzinfo=timezone.utc)
+    formatted_date = event_date.strftime("%m/%d/%Y")
+
+    # Calculate countdown
+    current_time = datetime.now(timezone.utc)
+    event_datetime = datetime.combine(event_date.date(), event_time_utc.time()).replace(tzinfo=timezone.utc)
+    time_until_event = event_datetime - current_time
+
+    hours, remainder = divmod(int(time_until_event.total_seconds()), 3600)
+    minutes = remainder // 60
+    if time_until_event.total_seconds() > 0:
+        starts_in = f"Starts in {hours}h {minutes}m"
+    else:
+        starts_in = "Already started or in progress"
+
+    # Add embed fields (with spacing)
+    embed.add_field(name="📌 Status", value=f"**{status_display}**\n", inline=False)
+    embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
+    embed.add_field(name="🕒 Time", value=f"**{formatted_time}** UTC", inline=True)
+    embed.add_field(name="⏳ Countdown", value=starts_in, inline=False)
+
+    # Participants
     attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
     if event_data["host"] not in attendees_list:
         attendees_list.insert(0, event_data["host"])
 
-    formatted_attendees = ", ".join(attendees_list) if attendees_list else "No participants yet"
-
     cap = event_data.get("max_attendees")
+    participant_display = ""
+
+    # Grouped user display (up to 4 per line)
+    grouped_users = [
+        " ".join(attendees_list[i:i+4])
+        for i in range(0, len(attendees_list), 4)
+    ]
+    participant_display += "\n" + "\n".join(grouped_users)
+
     if cap is not None:
-        formatted_attendees += f" **({len(attendees_list)}/{cap})**"
+        open_slots = cap - len(attendees_list)
+        if open_slots > 0:
+            slot_text = "`Open Slot`"
+            grouped_slots = [
+                " ".join([slot_text] * min(4, open_slots - i))
+                for i in range(0, open_slots, 4)
+            ]
+            participant_display += "\n" + "\n".join(grouped_slots)
+
+        participant_display += f"\n\n**{len(attendees_list)}/{cap} slots filled**"
         if len(attendees_list) >= cap:
-            formatted_attendees += " 🔒 Full"
+            participant_display += " 🔒 Full"
 
-    embed.add_field(name="✅ Participants", value=formatted_attendees, inline=False)
+    embed.add_field(name="✅ Participants", value=participant_display or "No participants yet", inline=False)
 
-    embed.set_footer(text="Click a button below to join, leave, or complete the event!")
-
-    team_size = len(attendees_list)
+    # Extra info
     created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
     formatted_creation_time = created_at.strftime("%b %d, %Y at %I:%M %p")
-    additional_info = f"Team Size: {team_size} • Created at {formatted_creation_time}"
-    embed.add_field(name="Info", value=additional_info, inline=False)
+    info = (
+        f"👤 **Host**: {event_data['host']}\n"
+        f"🛠️ **Created**: {formatted_creation_time}\n"
+        f"👥 **Team Size**: {len(attendees_list)}"
+    )
+    embed.add_field(name="ℹ️ Info", value="\n" + info, inline=False)
+
+    embed.set_footer(text="\n\nClick a button below to join, leave, or complete the event!")
 
     view = ParticipationView(event_data["title"], event_data["host"])
     bot.add_view(view)
-
     return embed, view
 
 async def display_event(ctx, event_data):
@@ -313,46 +351,65 @@ class CompleteEventButton(discord.ui.Button):
         await interaction.response.send_message(f"✅ Event **'{self.event_title}'** has been marked as **Completed**!", ephemeral=True)
 
 async def display_completed_event(ctx, event_data):
-    """Displays the final event embed after completion (buttons removed)."""
-    embed = discord.Embed(title=f"📅 {event_data['title']}", description=event_data['description'], color=discord.Color.red())
+    """
+    Displays a polished final event embed after completion.
 
+    Args:
+        ctx: The context to send/edit the message in.
+        event_data (dict): The event data dictionary.
+    """
+    embed = discord.Embed(
+        title=f"📅 {event_data['title']}",
+        description=f"📝 {event_data['description']}",
+        color=discord.Color.red()
+    )
+
+    # Time and date formatting
     event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-
     formatted_time = event_time_utc.strftime("%H:%M")
-
-    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")  # Use '-' as separator
-    formatted_date = event_date.strftime("%m/%d/%Y")  # Format it as MM/DD/YYYY
-
-    current_time = datetime.utcnow()
-    days_since_event = (current_time - event_date).days
-
-    if days_since_event == 0:
-        date_display = f"{formatted_date} (this event concluded today)"
-    elif days_since_event > 0:
-        date_display = f"{formatted_date} (this event concluded {days_since_event} day{'s' if days_since_event > 1 else ''} ago)"
-    else:
-        date_display = formatted_date
+    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")
+    formatted_date = event_date.strftime("%m/%d/%Y")
 
     embed.add_field(name="📌 Status", value="🔴 Completed", inline=False)
-    embed.add_field(name="🎤 Host", value=event_data["host"], inline=False)
-    embed.add_field(name="📅 Date", value=date_display, inline=False)
-    embed.add_field(name="🕒 Time", value=f"{formatted_time} (gametime)", inline=False)
+    embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
+    embed.add_field(name="🕒 Time", value=f"**{formatted_time}** UTC", inline=True)
 
+    # Participants
     attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
-    formatted_attendees = ", ".join(attendees_list) if attendees_list else "No participants"
+    if event_data["host"] not in attendees_list:
+        attendees_list.insert(0, event_data["host"])
 
-    embed.add_field(name="✅ Final Participants", value=formatted_attendees, inline=False)
+    grouped_users = [
+        " ".join(attendees_list[i:i+4])
+        for i in range(0, len(attendees_list), 4)
+    ]
+    participants_text = "\n".join(grouped_users)
+
+    embed.add_field(name="✅ Final Participants", value=participants_text or "No participants", inline=False)
+
+    # Info section
+    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
+    formatted_created = created_at.strftime("%b %d, %Y at %I:%M %p")
+    info = (
+        f"👤 **Host**: {event_data['host']}\n"
+        f"🛠️ **Created**: {formatted_created}\n"
+        f"👥 **Team Size**: {len(attendees_list)}"
+    )
+    embed.add_field(name="ℹ️ Info", value="\n" + info, inline=False)
+
     embed.set_footer(text="This event has now concluded. Thank you for participating!")
 
+    # Edit or send new message
     if event_data["message_id"]:
         try:
             message = await ctx.fetch_message(int(event_data["message_id"]))
-            await message.edit(embed=embed, view=None)  # Remove buttons
+            await message.edit(embed=embed, view=None)
             return message
         except discord.NotFound:
             return await ctx.send(embed=embed)
     else:
         return await ctx.send(embed=embed)
+
 
 class ParticipateButton(discord.ui.Button):
     """Button to allow users to join an event."""
