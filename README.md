@@ -27,10 +27,11 @@ A Discord bot designed to make creating and managing events easy and interactive
 - SQLite3
 - `config.json` file with your bot token and guild ID:
 
+- GUILD_ID is your discord server ID which admins can get by right clicking their server and selecting the option "Copy Server ID"
 ```json
 {
   "TOKEN": "your-discord-bot-token",
-  "GUILD_ID": (Discord Server ID) e.g. 123456789012345678
+  "GUILD_ID": 123456789012345678 
 }
 ```
 ## 🛠️ Installation
