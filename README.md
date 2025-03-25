@@ -35,8 +35,8 @@ A fully interactive Discord bot for creating, managing, and participating in eve
   "TOKEN": "your-bot-token-here",
   "GUILD_ID": 123456789012345678
 }
-Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your server name → "Copy Server ID".
 ```
+Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your server name → "Copy Server ID".
 
 ## 🛠️ Installation
 
@@ -46,7 +46,7 @@ Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your
 
 ```bash
 pip install -r requirements.txt
-
+```
 ## 💬 Slash Commands
 
 | Command              | Description                                                   |
