@@ -38,6 +38,8 @@ A fully interactive Discord bot for creating, managing, and participating in eve
 ```
 Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your server name → "Copy Server ID".
 
+---
+
 ## 🛠️ Installation
 
 1. Clone this repository  
@@ -47,6 +49,9 @@ Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
 ## 💬 Slash Commands
 
 | Command              | Description                                                   |
@@ -62,6 +67,7 @@ pip install -r requirements.txt
 | `/edit remove`       | Remove a participant from an event                            |
 | `/commands`          | Show all available slash commands                             |
 
+---
 
 ## 🧪 Database
 
