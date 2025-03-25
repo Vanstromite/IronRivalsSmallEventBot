@@ -360,13 +360,15 @@ class CompleteEventButton(discord.ui.Button):
             role = discord.utils.get(channel.guild.roles, id=event_data["role_id"])
             if role:
                 await channel.send(f"🎉 **Thank you for participating in '{self.event_title}'!** 🎉\n"
-                                   f"<@&{role.id}>, this event has now concluded.")
-            await display_completed_event(channel, event_data)
+                                f"<@&{role.id}>, this event has now concluded.")
 
+            # Capture actual time of completion
+            ended_at = datetime.now(timezone.utc)
+            await display_completed_event(channel, event_data, ended_at=ended_at)
         execute_query("DELETE FROM events WHERE title = ?", (self.event_title,))
         await interaction.response.send_message(f"✅ Event **'{self.event_title}'** has been marked as **Completed**!", ephemeral=True)
 
-async def display_completed_event(ctx, event_data):
+async def display_completed_event(ctx, event_data, ended_at=None):
     """
     Displays a polished final event embed after completion.
 
@@ -380,14 +382,14 @@ async def display_completed_event(ctx, event_data):
         color=discord.Color.red()
     )
 
-    # Parse time and date
-    event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-    event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")
-    event_datetime = datetime.combine(event_date.date(), event_time_utc.time()).replace(tzinfo=timezone.utc)
+    if ended_at is None:
+        # Fallback to scheduled time if not provided
+        event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
+        event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")
+        ended_at = datetime.combine(event_date.date(), event_time_utc.time()).replace(tzinfo=timezone.utc)
 
-    # Format date + ended timestamp
-    formatted_date = event_datetime.strftime("%A, %B %d, %Y")
-    end_timestamp = int(event_datetime.timestamp())
+    formatted_date = ended_at.strftime("%A, %B %d, %Y")
+    end_timestamp = int(ended_at.timestamp())
 
     embed.add_field(name="📌 Status", value="🔴 Completed", inline=False)
 
