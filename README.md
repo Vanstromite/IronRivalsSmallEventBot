@@ -50,6 +50,11 @@ Tip: To get your Guild ID, enable Developer Mode in Discord and right-click your
 pip install -r requirements.txt
 ```
 
+Run the bot:
+```bash
+python eventbot.py
+```
+
 ---
 
 ## 💬 Slash Commands
@@ -73,3 +78,13 @@ pip install -r requirements.txt
 
 All events are stored in a local `events.db` SQLite database. Events persist across restarts, and views/buttons are restored automatically.
 
+---
+
+## 🔐 Permissions
+
+- Only **event hosts** or **admins** can:
+  - Edit event details
+  - Delete events
+  - Transfer host role
+- Only **admins** can:
+  - Use `/deleteallevents`
