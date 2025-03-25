@@ -219,27 +219,16 @@ async def display_event_embed_and_view(event_data):
     # Game Date and Time (UTC formatted as "Game Time")
     formatted_date = event_datetime.strftime("%m/%d/%Y")
     formatted_game_time = event_datetime.strftime("%H:%M")
-    formatted_local_time = f"<t:{timestamp}:t>"
+    formatted_local_time = f"<t:{timestamp}:t>"  # No seconds
 
-    # Countdown
+    # Countdown (live while upcoming, static if passed)
     current_time = datetime.now(timezone.utc)
-    time_until_event = event_datetime - current_time
-    if time_until_event.total_seconds() > 0:
-        days, remainder = divmod(int(time_until_event.total_seconds()), 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes = remainder // 60
-
-        parts = []
-        if days > 0:
-            parts.append(f"{days}d")
-        if hours > 0 or days > 0:
-            parts.append(f"{hours}h")
-        parts.append(f"{minutes}m")
-
-        countdown_text = f"Starts in {' '.join(parts)}"
+    if event_datetime > current_time:
+        countdown_text = f"<t:{timestamp}:R>"  # Discord auto-updating
     else:
         countdown_text = "Already started or in progress"
-    # Add embed fields (with spacing)
+
+    # Add embed fields
     embed.add_field(name="📌 Status", value=f"**{status_display}**\n", inline=False)
     embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
     embed.add_field(name="🕒 Game Time", value=f"**{formatted_game_time}**", inline=True)
@@ -292,7 +281,6 @@ async def display_event_embed_and_view(event_data):
     view = ParticipationView(event_data["title"], event_data["host"])
     bot.add_view(view)
     return embed, view
-
 
 async def display_event(ctx, event_data):
     """Displays or updates an event embed using event_data dictionary."""
