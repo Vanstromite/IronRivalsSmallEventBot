@@ -18,7 +18,7 @@ import json
 import pytz
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
+from discord import app_commands, ui
 from discord.errors import NotFound, Forbidden, HTTPException
 
 # Load configuration from config.json
@@ -217,7 +217,7 @@ async def display_event_embed_and_view(event_data):
     timestamp = int(event_datetime.timestamp())
 
     # Game Date and Time (UTC formatted as "Game Time")
-    formatted_date = event_datetime.strftime("%m/%d/%Y")
+    formatted_date = event_datetime.strftime("%A, %B %d, %Y")
     formatted_game_time = event_datetime.strftime("%H:%M")
     formatted_local_time = f"<t:{timestamp}:t>"  # No seconds
 
@@ -226,13 +226,17 @@ async def display_event_embed_and_view(event_data):
     if event_datetime > current_time:
         countdown_text = f"<t:{timestamp}:R>"  # Discord auto-updating
     else:
-        countdown_text = "Already started or in progress"
+        countdown_text = "🔥Event In Progress🔥"
 
     # Add embed fields
     embed.add_field(name="📌 Status", value=f"**{status_display}**\n", inline=False)
-    embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
-    embed.add_field(name="🕒 Game Time", value=f"**{formatted_game_time}**", inline=True)
-    embed.add_field(name="🕓 Local Time", value=f"{formatted_local_time}", inline=True)
+    embed.add_field(
+        name="🕓 Schedule",
+        value=f"**Date:** {formatted_date}\n"
+            f"**Game Time:** {formatted_game_time}\n"
+            f"**Local Time:** {formatted_local_time}",
+        inline=False
+    )
     embed.add_field(name="⏳ Countdown", value=countdown_text, inline=False)
 
     # Participants
@@ -267,8 +271,9 @@ async def display_event_embed_and_view(event_data):
     embed.add_field(name="✅ Participants", value=participant_display or "No participants yet", inline=False)
 
     # Extra info
-    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
-    formatted_creation_time = created_at.strftime("%b %d, %Y at %I:%M %p")
+    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    created_timestamp = int(created_at.timestamp())
+    formatted_creation_time = f"<t:{created_timestamp}:F>"
     info = (
         f"👤 **Host**: {event_data['host']}\n"
         f"🛠️ **Created**: {formatted_creation_time}\n"
@@ -367,17 +372,29 @@ async def display_completed_event(ctx, event_data):
         color=discord.Color.red()
     )
 
-    # Time and date formatting
+    # Parse time and date
     event_time_utc = datetime.strptime(event_data['time'], "%H:%M UTC")
-    formatted_time = event_time_utc.strftime("%H:%M")
     event_date = datetime.strptime(event_data['date'], "%d-%m-%Y")
-    formatted_date = event_date.strftime("%m/%d/%Y")
+    event_datetime = datetime.combine(event_date.date(), event_time_utc.time()).replace(tzinfo=timezone.utc)
+
+    # Format date + ended timestamp
+    formatted_date = event_datetime.strftime("%A, %B %d, %Y")
+    end_timestamp = int(event_datetime.timestamp())
 
     embed.add_field(name="📌 Status", value="🔴 Completed", inline=False)
-    embed.add_field(name="📅 Date", value=f"**{formatted_date}**", inline=True)
-    embed.add_field(name="🕒 Time", value=f"**{formatted_time}** UTC", inline=True)
 
-    # Participants
+    # 🕓 Schedule block with local time
+    embed.add_field(
+        name="🕓 Schedule",
+        value=(
+            f"**Date:** {formatted_date}\n"
+            f"**Ended At:** <t:{end_timestamp}:f>\n"
+            f"**Relative:** <t:{end_timestamp}:R>"
+        ),
+        inline=False
+    )
+
+    # ✅ Final Participants
     attendees_list = event_data["attendees"].split(", ") if event_data["attendees"] else []
     if event_data["host"] not in attendees_list:
         attendees_list.insert(0, event_data["host"])
@@ -387,22 +404,23 @@ async def display_completed_event(ctx, event_data):
         for i in range(0, len(attendees_list), 4)
     ]
     participants_text = "\n".join(grouped_users)
-
     embed.add_field(name="✅ Final Participants", value=participants_text or "No participants", inline=False)
 
-    # Info section
-    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S")
-    formatted_created = created_at.strftime("%b %d, %Y at %I:%M %p")
+    # ℹ️ Info section
+    created_at = datetime.strptime(event_data["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    created_ts = int(created_at.timestamp())
+    formatted_created = f"<t:{created_ts}:f>"
+
     info = (
         f"👤 **Host**: {event_data['host']}\n"
         f"🛠️ **Created**: {formatted_created}\n"
         f"👥 **Team Size**: {len(attendees_list)}"
     )
-    embed.add_field(name="ℹ️ Info", value="\n" + info, inline=False)
+    embed.add_field(name="ℹ️ Info", value=info, inline=False)
 
     embed.set_footer(text="This event has now concluded. Thank you for participating!")
 
-    # Edit or send new message
+    # Edit or send
     if event_data["message_id"]:
         try:
             message = await ctx.fetch_message(int(event_data["message_id"]))
@@ -526,92 +544,96 @@ class LeaveButton(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ You are not in this event!", ephemeral=True)
 
-# Slash Command: Create a New Event
-@tree.command(name="host_event", description="Create a new event with title, date, time, and description.")
+class HostEventModal(ui.Modal, title="Host a New Event"):
+    def __init__(self, bot, interaction):
+        super().__init__()
+        self.bot = bot
+        self.interaction = interaction
+
+        self.title_input = ui.TextInput(label="Event Title", max_length=100)
+        self.date = ui.TextInput(label="Date (YYYY-MM-DD)", placeholder="YYYY-MM-DD")
+        self.time = ui.TextInput(label="Time (24h, Gametime, HH:MM)", placeholder="HH:MM")
+        self.description = ui.TextInput(label="Event Description", style=discord.TextStyle.paragraph)
+        self.max_attendees = ui.TextInput(label="Max Attendees (optional)", required=False, placeholder="Leave blank for unlimited")
+
+        self.add_item(self.title_input)
+        self.add_item(self.date)
+        self.add_item(self.time)
+        self.add_item(self.description)
+        self.add_item(self.max_attendees)
+    async def on_submit(self, interaction: discord.Interaction):
+        # Validate first BEFORE defer
+        try:
+            event_date = datetime.strptime(self.date.value, "%Y-%m-%d").date()
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Invalid date format! Use **YYYY-MM-DD** (e.g. `2025-03-25`) and make sure it's a real calendar date.",
+                ephemeral=True
+            )
+
+        try:
+            event_time = datetime.strptime(self.time.value, "%H:%M").time()
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Invalid time format! Use **24-hour format** like `18:30` (for 6:30 PM).",
+                ephemeral=True
+            )
+
+        # ✅ Valid input — now safe to defer
+        await interaction.response.defer(thinking=True)
+
+        # Continue building the event
+        event_datetime = datetime.combine(event_date, event_time).replace(tzinfo=pytz.utc)
+        title = self.title_input.value
+        description = self.description.value
+        max_attendees = int(self.max_attendees.value) if self.max_attendees.value and self.max_attendees.value.isdigit() else None
+
+        # Check for duplicate event
+        if get_event_data(title):
+            return await interaction.followup.send(f"❌ An event with the title '{title}' already exists.")
+
+        role = await interaction.guild.create_role(name=f"Event {title}")
+        event_host = interaction.user.mention
+        attendees = event_host
+
+        # Insert into DB
+        with sqlite3.connect("events.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO events (
+                    title, date, time, description, attendees, message_id,
+                    role_id, channel_id, host, status, created_at, max_attendees
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                title,
+                event_date.strftime("%d-%m-%Y"),
+                event_datetime.strftime("%H:%M UTC"),
+                description,
+                attendees,
+                "",
+                role.id,
+                interaction.channel_id,
+                event_host,
+                "Upcoming",
+                datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                max_attendees
+            ))
+            conn.commit()
+
+        await interaction.user.add_roles(role)
+
+        event_data = get_event_data(title)
+        embed, view = await display_event_embed_and_view(event_data)
+        await interaction.followup.send(embed=embed, view=view)
+
+        message = await interaction.original_response()
+        execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
+
+@tree.command(name="host_event", description="Create a new event (uses a modal)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.describe(
-    title="Title of the event",
-    date="Date in DD-MM-YYYY format",
-    time="Time in HH:MM (24h)",
-    description="Details about the event",
-    max_attendees="Max number of participants (optional)"
-)
-async def host_event(
-    interaction: discord.Interaction,
-    title: str,
-    date: str,
-    time: str,
-    description: str,
-    max_attendees: int = None
-):
-    """
-    Slash command to create a new event.
+async def host_event(interaction: discord.Interaction):
+    await interaction.response.send_modal(HostEventModal(bot, interaction))
 
-    Args:
-        interaction (discord.Interaction): The interaction from Discord.
-        title (str): Event title.
-        date (str): Date in DD-MM-YYYY format.
-        time (str): Time in HH:MM (24h format).
-        description (str): Description of the event.
-        max_attendees (int, optional): Max number of participants.
-    """
-    await interaction.response.defer(thinking=True)
-
-    # Check for duplicate event
-    if get_event_data(title):
-        await interaction.followup.send(f"❌ An event with the title '{title}' already exists.")
-        return
-
-    try:
-        event_date = datetime.strptime(date, "%d-%m-%Y").strftime("%d-%m-%Y")
-        utc_time = datetime.strptime(time, "%H:%M").replace(tzinfo=pytz.utc)
-    except ValueError:
-        await interaction.followup.send("❌ Invalid date or time format.")
-        return
-
-    # Create event role
-    role = await interaction.guild.create_role(name=f"Event {title}")
-    event_host = interaction.user.mention
-    attendees = event_host
-
-    if max_attendees is not None and max_attendees <= 0:
-        max_attendees = None
-
-    # Insert event into the database
-    with sqlite3.connect("events.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO events (
-                title, date, time, description, attendees, message_id,
-                role_id, channel_id, host, status, created_at, max_attendees
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            title,
-            event_date,
-            utc_time.strftime("%H:%M UTC"),
-            description,
-            attendees,
-            "",  # Message ID will be set after sending the embed
-            role.id,
-            interaction.channel_id,
-            event_host,
-            "Upcoming",
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            max_attendees
-        ))
-        conn.commit()
-
-    # Assign role to the host
-    await interaction.user.add_roles(role)
-
-    # Build the embed and view, then send the initial response
-    event_data = get_event_data(title)
-    embed, view = await display_event_embed_and_view(event_data)
-    await interaction.followup.send(embed=embed, view=view)
-
-    # Update the message_id in the database
-    message = await interaction.original_response()
-    execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
 # Slash Command: Delete an Event
 @tree.command(name="deleteevent", description="Delete a specific event and its associated data.")
