@@ -86,7 +86,7 @@ def setup_database():
 
 setup_database()
 
-async def autocomplete_event_titles(interaction: discord.Interaction, current: str):
+async def autocomplete_event_titles(_interaction: discord.Interaction, current: str):
     """Suggests up to 25 matching event titles based on user input."""
     results = execute_query("SELECT title FROM events")
     titles = [row[0] for row in results if row[0].lower().startswith(current.lower())]
@@ -152,6 +152,15 @@ async def check_event_reminders():
 
 
 def get_event_data(title):
+    """
+    Retrieve event data from the database by title.
+
+    Args:
+        title (str): The title of the event to retrieve.
+
+    Returns:
+        dict or None: A dictionary of event fields if found, else None.
+    """
     event = execute_query("""
         SELECT title, date, time, description, attendees, message_id,
                role_id, channel_id, host, status, created_at, max_attendees
@@ -176,7 +185,6 @@ def get_event_data(title):
         "status": event[9],
         "created_at": event[10],
         "max_attendees": event[11] if len(event) > 11 else None
-
     }
 
 async def display_event_embed_and_view(event_data):
@@ -544,10 +552,12 @@ class LeaveButton(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ You are not in this event!", ephemeral=True)
 
-class HostEventModal(ui.Modal, title="Host a New Event"):
-    def __init__(self, bot, interaction):
-        super().__init__()
-        self.bot = bot
+
+class HostEventModal(ui.Modal):
+    """Modal form for creating a new event via user input."""
+    def __init__(self, bot_instance, interaction):
+        super().__init__(title="Host a New Event")
+        self.bot = bot_instance
         self.interaction = interaction
 
         self.title_input = ui.TextInput(label="Event Title", max_length=100)
@@ -629,11 +639,13 @@ class HostEventModal(ui.Modal, title="Host a New Event"):
         message = await interaction.original_response()
         execute_query("UPDATE events SET message_id = ? WHERE title = ?", (str(message.id), title))
 
-@tree.command(name="host_event", description="Create a new event (uses a modal)")
+@tree.command(name="host_event", description="Create a new event (uses a modal, press enter to bring up)")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def host_event(interaction: discord.Interaction):
+    """
+    Slash command to open a modal for creating a new event.
+    """
     await interaction.response.send_modal(HostEventModal(bot, interaction))
-
 
 # Slash Command: Delete an Event
 @tree.command(name="deleteevent", description="Delete a specific event and its associated data.")
@@ -754,7 +766,7 @@ async def transferhost(
 
 @transferhost.autocomplete("event_title")
 async def event_title_autocomplete(
-    interaction: discord.Interaction,
+    _interaction: discord.Interaction,
     current: str
 ):
     """
